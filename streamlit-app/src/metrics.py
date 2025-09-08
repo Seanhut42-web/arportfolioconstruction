@@ -1,27 +1,46 @@
-import math
+
+from __future__ import annotations
 import numpy as np
 import pandas as pd
 
 
-def compute_drawdown(cum: pd.Series) -> pd.Series:
+def compute_drawdown(r: pd.Series) -> pd.Series:
+    cum = (1 + r.fillna(0)).cumprod()
     peak = cum.cummax()
-    return cum / peak - 1.0
+    dd = cum / peak - 1.0
+    return dd
 
 
-def summarize(ret_m: pd.Series, periods: int = 12) -> dict:
-    if ret_m.empty:
-        return {}
-    cg = (1 + ret_m).prod()
-    yrs = len(ret_m) / periods
-    ann_ret = cg**(1 / yrs) - 1 if yrs > 0 else np.nan
-    ann_vol = ret_m.std(ddof=0) * math.sqrt(periods)
-    sharpe = ann_ret / ann_vol if (ann_vol and ann_vol > 0) else np.nan
-    max_dd = compute_drawdown((1 + ret_m).cumprod()).min()
-    calmar = ann_ret / abs(max_dd) if (isinstance(max_dd, (float, np.floating)) and max_dd < 0) else np.nan
-    return {
-        "Ann. Return": ann_ret,
-        "Ann. Vol": ann_vol,
-        "Sharpe (rf=0)": sharpe,
-        "Max Drawdown": max_dd,
-        "Calmar": calmar,
-    }
+def summarize(r: pd.Series | pd.DataFrame, freq: str = 'M') -> pd.DataFrame:
+    """Return basic performance stats.
+    If DataFrame, compute per column.
+    """
+    if isinstance(r, pd.DataFrame):
+        return pd.concat({c: summarize(r[c], freq).iloc[:, 0] for c in r.columns}, axis=1)
+
+    r = r.dropna()
+    if len(r) == 0:
+        return pd.DataFrame()
+
+    periods_per_year = {
+        'D': 252, 'W': 52, 'M': 12, 'Q': 4
+    }.get(freq.upper(), 12)
+
+    total_return = (1 + r).prod() - 1
+    years = max((r.index[-1] - r.index[0]).days / 365.25, 1e-9)
+    cagr = (1 + total_return) ** (1 / years) - 1 if years > 0 else np.nan
+
+    vol_a = r.std(ddof=1) * np.sqrt(periods_per_year)
+    sr = r.mean() * periods_per_year / vol_a if vol_a != 0 else np.nan
+
+    dd = compute_drawdown(r)
+    maxdd = dd.min()
+
+    out = pd.DataFrame({
+        'CAGR': [cagr],
+        'Vol': [vol_a],
+        'Sharpe': [sr],
+        'MaxDD': [maxdd],
+        'N': [len(r)],
+    }).T
+    return out

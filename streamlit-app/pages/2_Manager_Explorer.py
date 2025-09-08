@@ -1,34 +1,35 @@
-from pathlib import Path
+
 import streamlit as st
 import pandas as pd
 import plotly.graph_objects as go
-from src.hedging import build_hedging_inputs, apply_partial_hedge
-from src.metrics import summarize
+from src.ingest import read_manager_sheet
+from src.metrics import summarize, compute_drawdown
+from src.hedging import apply_partial_hedge
 
 st.set_page_config(page_title="Manager Explorer", layout="wide")
+st.title("Manager Explorer")
 
-@st.cache_data(show_spinner="Loading inputs…", ttl=None)
-def load_inputs():
-    xlsx_path = Path(__file__).parent.parent / "data" / "Manager Track Records v2.xlsx"
-    return build_hedging_inputs(xlsx_path)
+up = st.file_uploader("Upload manager returns (CSV/XLSX)", type=["csv","xlsx","xls"])
 
-man_local_m, man_ccy, fx_ret_m, span = load_inputs()
+df = read_manager_sheet(up) if up else read_manager_sheet(None)
+if df.empty:
+    st.info("Upload a file or use the demo dataset.")
+    st.stop()
 
-manager = st.selectbox("Manager", sorted(man_local_m.keys()))
-h = st.slider("Hedge ratio (GBP base for USD managers)", 0.0, 1.0, 1.0, 0.05)
-local = man_local_m[manager]
-ccy = man_ccy[manager]
+m = st.selectbox("Manager", df.columns)
+hedge = st.slider("Partial hedge (0-100%)", 0, 100, 0, 5) / 100.0
 
-gbp = apply_partial_hedge(local, ccy, fx_ret_m, hedge_ratio=h)
-st.caption(f"Currency: **{ccy}** | Period: {gbp.index.min().date()} → {gbp.index.max().date()}")
+series = df[m]
+adj = apply_partial_hedge(series, hedge_weight=hedge)
 
-fig = go.Figure()
-fig.add_trace(go.Scatter(x=gbp.index, y=(1+gbp).cumprod(), name="GBP (selected hedge)", line=dict(width=3)))
-fig.update_layout(title="Cumulative Growth of £1", hovermode="x unified", yaxis_title="Value (£)" )
-st.plotly_chart(fig, use_container_width=True)
-
-st.markdown("**Last 12 months (GBP, selected hedge)**")
-st.dataframe(gbp.tail(12).to_frame("Monthly return").style.format("{:.2%}"))
-
-st.markdown("**Summary (GBP, selected hedge)**")
-st.dataframe(pd.DataFrame(summarize(gbp), index=[0]).T.rename(columns={0: "Value"}).style.format({"Value": "{:.2%}"}))
+# Plots and tables
+c1, c2 = st.columns(2)
+with c1:
+    st.subheader("Summary")
+    st.dataframe(summarize(adj).style.format("{:.2%}"), use_container_width=True)
+with c2:
+    st.subheader("Drawdown")
+    dd = compute_drawdown(adj)
+    fig = go.Figure(go.Scatter(x=dd.index, y=dd, mode='lines', name='DD'))
+    fig.update_layout(yaxis_title='Drawdown', xaxis_title='', yaxis_tickformat='.0%')
+    st.plotly_chart(fig, use_container_width=True)
