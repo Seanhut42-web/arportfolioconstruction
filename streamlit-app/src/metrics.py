@@ -2,9 +2,11 @@ import math
 import numpy as np
 import pandas as pd
 
+
 def compute_drawdown(cum: pd.Series) -> pd.Series:
     peak = cum.cummax()
     return cum / peak - 1.0
+
 
 def summarize(ret_m: pd.Series, periods: int = 12) -> dict:
     if ret_m.empty:
