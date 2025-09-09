@@ -51,7 +51,7 @@ if selected:
 
 all_months = pd.Index(sorted(set().union(*[s.index for s in man_local_m.values()])))
 earliest_date, latest_date = all_months.min().date(), all_months.max().date()
-start_date = st.sidebar.date_input("Start date", value=earliest_date, min_value=earliest_date, max_value=latest_date)
+start_date = st.sidebar.date_input("Start date", value=pd.to_datetime("2016-01-01").date(), min_value=earliest_date, max_value=latest_date)
 st.sidebar.caption(f"Data span: **{earliest_date}** → **{latest_date}**")
 
 st.sidebar.header("Hedging")
