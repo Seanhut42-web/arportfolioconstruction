@@ -86,14 +86,12 @@ btn = st.button("Optimize", type="primary")
 def annualize_std(rm: pd.Series) -> float:
     return float(rm.std(ddof=0) * math.sqrt(12))
 
-
 def cagr_from_series(rm: pd.Series) -> float:
     if rm.empty:
         return float("nan")
     cg = (1.0 + rm).prod()
     yrs = len(rm) / 12.0
     return float(cg ** (1 / yrs) - 1) if yrs > 0 else float("nan")
-
 
 def max_drawdown_from_series(rm: pd.Series) -> float:
     cum = (1.0 + rm).cumprod()
@@ -108,7 +106,7 @@ if btn:
         st.stop()
 
     cols = df["Manager"].tolist()
-    R = panel[cols].dropna(how="all").fillna(0.0)
+    R = panel[cols].dropna(how="all").fillna(0.0)  # objective uses fillna(0.0)
 
     # Initial guess (normalized from Weight column over included)
     w0 = df["Weight"].values.astype(float)
@@ -192,7 +190,9 @@ if btn:
     st.session_state["_opt_cols"] = cols
     st.session_state["_opt_weights"] = w_opt
     st.session_state["_opt_panel"] = panel[cols]
-    st.session_state["_opt_port"] = (panel[cols] @ w_opt).dropna().rename("Portfolio (Optimized)")
+
+    # >>> Critical fix: fillna(0.0) so months with partial data are not dropped
+    st.session_state["_opt_port"] = (panel[cols].fillna(0.0) @ w_opt).rename("Portfolio (Optimized)")
 
 # --- Always-render Analysis, using persisted optimized results if present
 st.subheader("Analysis")

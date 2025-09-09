@@ -1,5 +1,6 @@
 # pages/3_Factor_Regression.py
 from __future__ import annotations
+from pathlib import Path
 from typing import Optional, Tuple, Dict
 
 import numpy as np
@@ -25,7 +26,7 @@ FACTOR_COLUMNS = [
     "S&P500", "Credit", "Value", "Growth", "Momentum", "Size", "Quality", "Carry"
 ]
 
-def read_factors_excel_prices(file) -> pd.DataFrame:
+def read_factors_excel_prices(file_or_path) -> pd.DataFrame:
     """
     Read factor PRICES from Excel with this layout:
       - Data starts on row 7 (1-based) -> skiprows=6
@@ -33,26 +34,22 @@ def read_factors_excel_prices(file) -> pd.DataFrame:
       - Columns B..I: S&P500, Credit, Value, Growth, Momentum, Size, Quality, Carry
     Returns MONTHLY RETURNS DataFrame indexed by month-end (ME).
     """
-    # Read with no header, skip the first 6 rows
-    df = pd.read_excel(file, header=None, skiprows=6)
-    # Keep first 9 columns (Date + 8 factors)
+    df = pd.read_excel(file_or_path, header=None, skiprows=6)
     df = df.iloc[:, : 1 + len(FACTOR_COLUMNS)].copy()
 
-    # Assign columns explicitly
     cols = ["Date"] + FACTOR_COLUMNS
-    df.columns = cols[: df.shape[1]]  # trim in case fewer columns present
+    df.columns = cols[: df.shape[1]]
 
-    # Clean / types
     df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df = df.dropna(subset=["Date"]).sort_values("Date").set_index("Date")
     for c in [c for c in df.columns if c in FACTOR_COLUMNS]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # These are prices → convert to monthly returns
+    # Prices -> month-end prices -> monthly returns
     px_last = df.resample("ME").last()
     ret = px_last.pct_change().dropna(how="all")
 
-    # Ensure purely numeric columns (drop columns that are all-NaN)
+    # keep only expected factor columns, drop all-NaN columns
     ret = ret[[c for c in FACTOR_COLUMNS if c in ret.columns]]
     ret = ret.dropna(how="all")
     return ret
@@ -68,7 +65,6 @@ def align_target_and_factors(r: pd.Series, F: pd.DataFrame) -> Tuple[pd.Series, 
 
 def run_ols(y: pd.Series, X: pd.DataFrame, add_const: bool = True, nw_lags: Optional[int] = None) -> Dict:
     if sm is None:
-        # NumPy fallback
         Xv = X.values
         if add_const:
             Xv = np.c_[np.ones(len(Xv)), Xv]
@@ -88,7 +84,6 @@ def run_ols(y: pd.Series, X: pd.DataFrame, add_const: bool = True, nw_lags: Opti
             "resid": pd.Series(resid, index=y.index, name="resid"),
         }
 
-    # statsmodels path
     X1 = sm.add_constant(X) if add_const else X
     if nw_lags is not None and nw_lags > 0:
         model = sm.OLS(y, X1).fit(cov_type="HAC", cov_kwds={"maxlags": int(nw_lags)})
@@ -172,35 +167,40 @@ else:
             s = pd.to_numeric(df_r[num_cols[0]], errors="coerce").dropna()
             if s.abs().max() > 2.0:
                 s = s / 100.0
-            # Monthly index
             s = (1.0 + s).resample("ME").prod() - 1.0
             ret = s
             st.success(f"Returns loaded: {ret.index.min().date()} → {ret.index.max().date()}")
 
-# --- Factor upload (REQUIRED) ---
-st.subheader("Upload Factor Set (Excel)")
+# --- Factor auto-load with optional override ---
+st.subheader("Factors (auto‑loaded from data/Factor Returns.xlsx)")
 
-upl_factors = st.file_uploader(
-    "Upload factor **prices** Excel (data start Row 7; Date in Col A; B..I: S&P500, Credit, Value, Growth, Momentum, Size, Quality, Carry)",
-    type=["xlsx", "xls"],
-)
-
+default_path = Path("data") / "Factor Returns.xlsx"
 factors = None
-if upl_factors is not None:
+if default_path.exists():
     try:
-        factors = read_factors_excel_prices(upl_factors)
+        factors = read_factors_excel_prices(default_path)
         st.success(
-            f"Factors loaded: {factors.index.min().date()} → {factors.index.max().date()} "
+            f"Loaded factors from data/Factor Returns.xlsx: "
+            f"{factors.index.min().date()} → {factors.index.max().date()} "
             f"({len(factors)} months; cols={list(factors.columns)})"
         )
         st.dataframe(factors.tail().style.format("{:.4f}"), use_container_width=True)
     except Exception as e:
-        st.error(f"Failed to parse factor Excel: {e}")
-else:
-    st.info(
-        "Please upload the factor **prices** Excel file. "
-        "The page no longer auto-loads from `data/Factor Returns.xlsx` to avoid ambiguity."
-    )
+        st.error(f"Failed to parse default factor Excel: {e}")
+
+# Optional override
+st.caption("Optionally upload a factor **prices** Excel to override the default.")
+upl_factors = st.file_uploader(
+    "Override factor file (optional): data start Row 7; Date in Col A; B..I: S&P500, Credit, Value, Growth, Momentum, Size, Quality, Carry",
+    type=["xlsx", "xls"],
+)
+if upl_factors is not None:
+    try:
+        factors = read_factors_excel_prices(upl_factors)
+        st.info("Overrode default factors with uploaded file.")
+        st.dataframe(factors.tail().style.format("{:.4f}"), use_container_width=True)
+    except Exception as e:
+        st.error(f"Failed to parse uploaded factor Excel: {e}")
 
 c1, c2, c3, c4 = st.columns([1, 1, 1, 1.4])
 with c1:
