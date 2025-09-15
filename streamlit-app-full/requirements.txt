@@ -16,7 +16,7 @@ matplotlib==3.10.6
 scipy==1.14.1
 plotly==5.22.0
 openpyxl==3.1.2
-PyMuPDF==1.24.10
+PyMuPDF==1.26.4
 
 # Optional (for HAC / Newey–West)
 statsmodels==0.14.2
