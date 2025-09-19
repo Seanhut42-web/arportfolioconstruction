@@ -19,4 +19,4 @@ openpyxl==3.1.2
 PyMuPDF==1.26.4
 
 # Optional (for HAC / Newey–West)
-statsmodels==0.14.2
+statsmodels==0.14.5
