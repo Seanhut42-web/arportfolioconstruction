@@ -233,13 +233,20 @@ else:
         if piv.empty:
             st.info("No data to build Year × Month table.")
         else:
-            fig_hm = px.imshow(piv, color_continuous_scale='RdYlGn', origin='upper', template=template)
+        fig_hm = px.imshow(piv.drop(columns=['YTD']), color_continuous_scale='RdYlGn', origin='upper', template=template)
             fig_hm.update_traces(
+        for y_idx, year in enumerate(piv.index):
+            ytd_val = piv.loc[year, 'YTD']
+            fig_hm.add_trace(go.Scatter(
+                x=['YTD'], y=[year], text=[f'{ytd_val:.1%}'], mode='text',
+                showlegend=False, hoverinfo='skip'))
                 hovertemplate="Year=%{y}<br>Column=%{x}<br>Return=%{z:.1%}<extra></extra>",
                 text=piv.applymap(lambda v: f"{v:.1%}" if pd.notna(v) else "").values,
                 texttemplate="%{text}",
             )
             fig_hm.update_layout(title='Year × Month (Portfolio monthly returns) — with YTD',
+        fig_hm.add_shape(type='line', x0=len(piv.columns)-1.5, x1=len(piv.columns)-1.5,
+                          y0=-0.5, y1=len(piv.index)-0.5, line=dict(color='black', width=2))
                                  xaxis_title='Month', yaxis_title='Year',
                                  coloraxis_colorbar=dict(title='Return', tickformat='.0%'),
                                  margin=dict(l=60, r=20, t=60, b=60))
