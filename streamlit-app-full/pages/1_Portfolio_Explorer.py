@@ -80,6 +80,10 @@ gbp_cash_ann = st.sidebar.number_input("GBP cash (annualised)", value=0.05, step
 usd_cash_ann = st.sidebar.number_input("USD cash (annualised)", value=0.05, step=0.001, format="%.3f")
 st.sidebar.caption("Hedged uses monthly carry ≈ (1+GBPcash)/(1+USDcash) − 1. (CIP proxy)")
 
+if st.sidebar.button("Reload data (after changing Excel)"):
+    load_inputs.clear()
+    st.experimental_rerun()
+
 run = st.button("Run portfolio analytics", type="primary", use_container_width=True)
 if run:
     start_ts = pd.Timestamp(start_date)
@@ -205,19 +209,37 @@ else:
             st.info("Select ≥2 managers with overlapping data to display correlation.")
 
     elif chart == "Year×Month":
-        dfym = port.to_frame("ret")
+        # Build Year×Month table and add YTD at the end
+        dfym = port.to_frame("ret").copy()
         dfym["Year"] = dfym.index.year
         dfym["Month"] = dfym.index.strftime("%b")
-        order = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
+        month_order = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+
         piv = dfym.pivot(index="Year", columns="Month", values="ret")
-        piv = piv[[c for c in order if c in piv.columns]]
+        piv = piv[[c for c in month_order if c in piv.columns]].sort_index()
+
+        # YTD (compounded across months available in that year)
+        ytd = (
+            dfym.groupby("Year")["ret"]
+                .apply(lambda x: (1.0 + x).prod() - 1.0)
+                .reindex(piv.index)
+        )
+        piv["YTD"] = ytd
+
+        final_cols = [c for c in month_order if c in piv.columns] + ["YTD"]
+        piv = piv[final_cols]
+
         if piv.empty:
             st.info("No data to build Year × Month table.")
         else:
             fig_hm = px.imshow(piv, color_continuous_scale='RdYlGn', origin='upper', template=template)
-            fig_hm.update_traces(hovertemplate="Year=%{y}<br>Month=%{x}<br>Return=%{z:.1%}<extra></extra>")
-            fig_hm.update_traces(text=piv.applymap(lambda v: f"{v:.1%}").values, texttemplate="%{text}")
-            fig_hm.update_layout(title='Year × Month (Portfolio monthly returns)',
+            fig_hm.update_traces(
+                hovertemplate="Year=%{y}<br>Column=%{x}<br>Return=%{z:.1%}<extra></extra>",
+                text=piv.applymap(lambda v: f"{v:.1%}" if pd.notna(v) else "").values,
+                texttemplate="%{text}",
+            )
+            fig_hm.update_layout(title='Year × Month (Portfolio monthly returns) — with YTD',
                                  xaxis_title='Month', yaxis_title='Year',
                                  coloraxis_colorbar=dict(title='Return', tickformat='.0%'),
                                  margin=dict(l=60, r=20, t=60, b=60))
