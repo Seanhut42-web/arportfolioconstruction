@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from src.hedging import build_hedging_inputs, build_panel_for_selection
@@ -208,49 +209,134 @@ else:
         else:
             st.info("Select ≥2 managers with overlapping data to display correlation.")
 
-    elif chart == "Year×Month":
-        # Build Year×Month table and add YTD at the end
-        dfym = port.to_frame("ret").copy()
-        dfym["Year"] = dfym.index.year
-        dfym["Month"] = dfym.index.strftime("%b")
+    
+elif chart == "Year×Month":
+    # Build Year×Month table and add YTD at the end (unchanged logic)
+    dfym = port.to_frame("ret").copy()
+    dfym["Year"] = dfym.index.year
+    dfym["Month"] = dfym.index.strftime("%b")
+    month_order = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    piv = dfym.pivot(index="Year", columns="Month", values="ret")
+    piv = piv[[c for c in month_order if c in piv.columns]].sort_index()
+    # YTD (compounded across months available in that year)
+    ytd = (
+        dfym.groupby("Year")["ret"]
+            .apply(lambda x: (1.0 + x).prod() - 1.0)
+            .reindex(piv.index)
+    )
+    piv["YTD"] = ytd
+    final_cols = [c for c in month_order if c in piv.columns] + ["YTD"]
+    piv = piv[final_cols]
 
-        month_order = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    if piv.empty:
+        st.info("No data to build Year × Month table.")
+    else:
+        # Separate data for monthly columns vs YTD (distinct heatmaps / color scales)
+        month_cols = [c for c in month_order if c in piv.columns]
+        years = piv.index.tolist()
+        z_months = piv[month_cols].values if month_cols else None
+        z_ytd = piv[["YTD"]].values
 
-        piv = dfym.pivot(index="Year", columns="Month", values="ret")
-        piv = piv[[c for c in month_order if c in piv.columns]].sort_index()
+        # Compute independent color ranges (symmetric around 0 for visual comparability)
+        import numpy as _np
+        def _sym_range(arr):
+            finite = _np.asarray(arr, dtype=float)
+            finite = finite[_np.isfinite(finite)]
+            if finite.size == 0:
+                return (-1.0, 1.0)
+            m = float(_np.nanmax(_np.abs(finite)))
+            if m == 0 or not _np.isfinite(m):
+                m = 1.0
+            return (-m, m)
 
-        # YTD (compounded across months available in that year)
-        ytd = (
-            dfym.groupby("Year")["ret"]
-                .apply(lambda x: (1.0 + x).prod() - 1.0)
-                .reindex(piv.index)
+        zmin_m, zmax_m = _sym_range(z_months) if month_cols else (-1.0, 1.0)
+        zmin_y, zmax_y = _sym_range(z_ytd)
+
+        # Build two-subplot heatmap so each gets its own colorbar/scale
+        cols_count = max(1, len(month_cols)) + 1
+        month_weight = max(1, len(month_cols))
+        ytd_weight = 1
+        total = month_weight + ytd_weight
+
+        fig_hm = make_subplots(
+            rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.04,
+            column_widths=[month_weight/total, ytd_weight/total],
+            subplot_titles=("Monthly", "YTD")
         )
-        piv["YTD"] = ytd
 
-        final_cols = [c for c in month_order if c in piv.columns] + ["YTD"]
-        piv = piv[final_cols]
+        import plotly.graph_objects as go
 
-        if piv.empty:
-            st.info("No data to build Year × Month table.")
-        else:
-        fig_hm = px.imshow(piv.drop(columns=['YTD']), color_continuous_scale='RdYlGn', origin='upper', template=template)
-            fig_hm.update_traces(
-        for y_idx, year in enumerate(piv.index):
-            ytd_val = piv.loc[year, 'YTD']
-            fig_hm.add_trace(go.Scatter(
-                x=['YTD'], y=[year], text=[f'{ytd_val:.1%}'], mode='text',
-                showlegend=False, hoverinfo='skip'))
-                hovertemplate="Year=%{y}<br>Column=%{x}<br>Return=%{z:.1%}<extra></extra>",
-                text=piv.applymap(lambda v: f"{v:.1%}" if pd.notna(v) else "").values,
-                texttemplate="%{text}",
+        # Month heatmap
+        if month_cols:
+            text_m = [[f"{v:.1%}" if pd.notna(v) else "" for v in row] for row in piv[month_cols].values]
+            fig_hm.add_trace(
+                go.Heatmap(
+                    z=z_months,
+                    x=month_cols,
+                    y=years,
+                    colorscale='RdYlGn',
+                    zmin=zmin_m, zmax=zmax_m,
+                    colorbar=dict(title='Monthly', tickformat='.0%', len=0.8, y=0.5),
+                    hovertemplate="Year=%{y}<br>Month=%{x}<br>Return=%{z:.1%}<extra></extra>",
+                    showscale=True,
+                    text=text_m,
+                    texttemplate="%{text}",
+                    textfont=dict(size=11),
+                ), row=1, col=1
             )
-            fig_hm.update_layout(title='Year × Month (Portfolio monthly returns) — with YTD',
-        fig_hm.add_shape(type='line', x0=len(piv.columns)-1.5, x1=len(piv.columns)-1.5,
-                          y0=-0.5, y1=len(piv.index)-0.5, line=dict(color='black', width=2))
-                                 xaxis_title='Month', yaxis_title='Year',
-                                 coloraxis_colorbar=dict(title='Return', tickformat='.0%'),
-                                 margin=dict(l=60, r=20, t=60, b=60))
-            st.plotly_chart(fig_hm, use_container_width=True)
+        else:
+            # If no monthly data columns exist, add an empty placeholder to keep layout stable
+            fig_hm.add_trace(
+                go.Heatmap(z=[[None]], x=["-"], y=[years[0] if years else "-"], showscale=False),
+                row=1, col=1
+            )
+
+        # YTD heatmap (separate coloraxis)
+        text_y = [[f"{v:.1%}" if pd.notna(v) else "" for v in row] for row in piv[["YTD"]].values]
+        fig_hm.add_trace(
+            go.Heatmap(
+                z=z_ytd,
+                x=["YTD"],
+                y=years,
+                colorscale='RdYlGn',
+                zmin=zmin_y, zmax=zmax_y,
+                colorbar=dict(title='YTD', tickformat='.0%', len=0.8, y=0.5),
+                hovertemplate="Year=%{y}<br>Column=%{x}<br>Return=%{z:.1%}<extra></extra>",
+                showscale=True,
+                text=text_y,
+                texttemplate="%{text}",
+                textfont=dict(size=11),
+            ), row=1, col=2
+        )
+
+        # Layout & titles
+        fig_hm.update_layout(
+            title='Year × Month (Portfolio monthly returns) — separate scales for Monthly vs YTD',
+            template=template,
+            margin=dict(l=60, r=20, t=60, b=60),
+        )
+
+        # Format axes
+        fig_hm.update_xaxes(title_text='Month', row=1, col=1)
+        fig_hm.update_xaxes(title_text='YTD', row=1, col=2)
+        fig_hm.update_yaxes(title_text='Year', autorange='reversed', row=1, col=1)
+
+        # Add a thick vertical border between Monthly and YTD panels
+        # Use paper coordinates to drop a narrow black band between subplots
+        try:
+            d1 = fig_hm.layout.xaxis.domain[1]  # right edge of first subplot
+            d2 = fig_hm.layout.xaxis2.domain[0] # left edge of second subplot
+            x0 = (d1 + d2)/2.0 - 0.0015
+            x1 = (d1 + d2)/2.0 + 0.0015
+            fig_hm.add_shape(
+                type='rect', xref='paper', yref='paper',
+                x0=x0, x1=x1, y0=0, y1=1,
+                line=dict(width=0), fillcolor='black'
+            )
+        except Exception:
+            pass
+
+        st.plotly_chart(fig_hm, use_container_width=True)
 
     st.subheader("Manager Contributions to Return and Risk")
     window = st.slider("Rolling window (months)", 12, 60, 36, 6, key="contrib_window")
