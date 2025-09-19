@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import streamlit as st
 
 from src.hedging import build_hedging_inputs, build_panel_for_selection
@@ -209,41 +210,97 @@ else:
             st.info("Select ≥2 managers with overlapping data to display correlation.")
 
     elif chart == "Year×Month":
-        # Build Year×Month table and add YTD at the end
+        # Build Year×Month table and add YTD at the end; use separate color scaling
         dfym = port.to_frame("ret").copy()
         dfym["Year"] = dfym.index.year
         dfym["Month"] = dfym.index.strftime("%b")
 
         month_order = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
-
-        piv = dfym.pivot(index="Year", columns="Month", values="ret")
-        piv = piv[[c for c in month_order if c in piv.columns]].sort_index()
+        piv = dfym.pivot(index="Year", columns="Month", values="ret").sort_index()
+        month_cols = [c for c in month_order if c in piv.columns]
+        piv_months = piv[month_cols] if month_cols else pd.DataFrame(index=piv.index)
 
         # YTD (compounded across months available in that year)
-        ytd = (
-            dfym.groupby("Year")["ret"]
-                .apply(lambda x: (1.0 + x).prod() - 1.0)
-                .reindex(piv.index)
-        )
-        piv["YTD"] = ytd
+        ytd = dfym.groupby("Year")["ret"].apply(lambda x: (1.0 + x).prod() - 1.0)
+        ytd = ytd.reindex(piv.index)
 
-        final_cols = [c for c in month_order if c in piv.columns] + ["YTD"]
-        piv = piv[final_cols]
-
-        if piv.empty:
+        if piv_months.empty and ytd.dropna().empty:
             st.info("No data to build Year × Month table.")
         else:
-            fig_hm = px.imshow(piv, color_continuous_scale='RdYlGn', origin='upper', template=template)
-            fig_hm.update_traces(
-                hovertemplate="Year=%{y}<br>Column=%{x}<br>Return=%{z:.1%}<extra></extra>",
-                text=piv.applymap(lambda v: f"{v:.1%}" if pd.notna(v) else "").values,
-                texttemplate="%{text}",
+            # Compute independent z ranges
+            if not piv_months.empty:
+                m_z = piv_months.values.astype(float)
+                m_min = np.nanmin(m_z) if np.isfinite(m_z).any() else 0.0
+                m_max = np.nanmax(m_z) if np.isfinite(m_z).any() else 0.0
+            else:
+                m_min = m_max = 0.0
+
+            ytd_vals = ytd.values.astype(float)
+            if np.isfinite(ytd_vals).any():
+                y_min = np.nanmin(ytd_vals)
+                y_max = np.nanmax(ytd_vals)
+            else:
+                y_min = y_max = 0.0
+
+            # Create side-by-side subplots (monthly | YTD)
+            left_w = max(len(month_cols), 1)
+            right_w = 1
+            fig = make_subplots(
+                rows=1, cols=2, shared_yaxes=True, horizontal_spacing=0.02,
+                column_widths=[left_w, right_w]
             )
-            fig_hm.update_layout(title='Year × Month (Portfolio monthly returns) — with YTD',
-                                 xaxis_title='Month', yaxis_title='Year',
-                                 coloraxis_colorbar=dict(title='Return', tickformat='.0%'),
-                                 margin=dict(l=60, r=20, t=60, b=60))
-            st.plotly_chart(fig_hm, use_container_width=True)
+
+            # Monthly heatmap (independent scale)
+            if not piv_months.empty:
+                fig.add_trace(
+                    go.Heatmap(
+                        x=month_cols,
+                        y=piv_months.index.astype(str),
+                        z=piv_months[month_cols].values,
+                        colorscale='RdYlGn', zmin=m_min, zmax=m_max,
+                        text=np.where(np.isnan(piv_months[month_cols].values), None,
+                                      np.vectorize(lambda v: f"{v:.1%}") (piv_months[month_cols].values)),
+                        texttemplate="%{text}", textfont=dict(color='black'),
+                        hovertemplate="Year=%{y}<br>Month=%{x}<br>Return=%{z:.1%}<extra></extra>",
+                        showscale=False
+                    ),
+                    row=1, col=1
+                )
+
+            # YTD heatmap (single column, independent scale)
+            fig.add_trace(
+                go.Heatmap(
+                    x=["YTD"],
+                    y=ytd.index.astype(str),
+                    z=ytd.to_frame("YTD").values,
+                    colorscale='RdYlGn', zmin=y_min, zmax=y_max,
+                    text=np.vectorize(lambda v: "" if pd.isna(v) else f"{v:.1%}")(ytd.values),
+                    texttemplate="%{text}", textfont=dict(color='black'),
+                    hovertemplate="Year=%{y}<br>Column=YTD<br>Return=%{z:.1%}<extra></extra>",
+                    showscale=True, colorbar=dict(title='YTD', tickformat='.0%', x=1.02)
+                ),
+                row=1, col=2
+            )
+
+            # Layout and styling
+            fig.update_yaxes(title_text='Year', row=1, col=1, autorange='reversed')
+            fig.update_xaxes(title_text='Month', row=1, col=1)
+            fig.update_xaxes(title_text='', row=1, col=2)
+            fig.update_layout(template=template, margin=dict(l=60, r=20, t=60, b=60),
+                              title='Year × Month (Portfolio monthly returns) — separate scales & YTD')
+
+            # Add a solid black border between monthly and YTD panels
+            # Use the subplot domains to draw a vertical line at the boundary
+            dom1 = fig.layout.xaxis.domain
+            dom2 = fig.layout.xaxis2.domain
+            x_sep = (dom1[1] + dom2[0]) / 2.0
+            fig.add_shape(
+                type='line', xref='paper', yref='paper',
+                x0=x_sep, x1=x_sep, y0=0, y1=1,
+                line=dict(color='black', width=3)
+            )
+
+            st.plotly_chart(fig, use_container_width=True)
 
     st.subheader("Manager Contributions to Return and Risk")
     window = st.slider("Rolling window (months)", 12, 60, 36, 6, key="contrib_window")
