@@ -1,9 +1,10 @@
 
 # 1_Portfolio_Explorer.py
-# Minimal change version (v3):
-# - Keeps everything else untouched (contributions, PDF, layout).
+# Minimal change version (v4):
+# - Keeps everything else untouched (contributions, layout, simplified Distribution).
 # - Keeps weights sliders at 0..1.
-# - Distribution tab simplified to ONLY: descriptive table + histogram (no KDE/QQ/violin/ECDF/date sliders).
+# - Upgrades PDF: includes EVERYTHING produced by the Portfolio Explorer tab
+#   using Plotly->PNG via kaleido and PDF assembly via PyMuPDF (with fallback to existing build_pdf).
 
 import math
 from pathlib import Path
@@ -12,12 +13,13 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
+import plotly.io as pio
 import streamlit as st
 
 from src.hedging import build_hedging_inputs, build_panel_for_selection
 from src.metrics import summarize, compute_drawdown
 from src.contrib import overall_return_contrib, overall_risk_contrib, rolling_contrib
-from src.report import build_pdf
+from src.report import build_pdf  # fallback
 from src.state import load_state_from_query, encode_state_to_query, apply_theme, get_plotly_template
 
 # ---------------------------------------------------------------------------
@@ -65,8 +67,6 @@ def render_distribution_panel(st, monthly_portfolio: pd.Series, template=None):
 
     with c1:
         desc_df = _desc_table(s)
-        fmt = { 'value': ("{:.2%}" if desc_df.index.str.contains(r"mean|std|min|max|p\\d+|%_positive|ann_", case=False).any() else None) }
-        # We'll format by row types for readability
         def _fmt_row(idx, val):
             try:
                 if any(k in idx for k in ["mean","std","min","max","p","%_positive","ann_"]):
@@ -86,12 +86,295 @@ def render_distribution_panel(st, monthly_portfolio: pd.Series, template=None):
     with c2:
         fig_h = px.histogram(x=s.values, nbins=nbins if nbins else None, template=template)
         fig_h.update_traces(marker_color="#1f77b4")
-        fig_h.update_layout(xaxis_title="Monthly return", yaxis_title="Count")
+        fig_h.update_layout(title="Distribution (Histogram)", xaxis_title="Monthly return", yaxis_title="Count")
         fig_h.update_xaxes(tickformat=".1%")
         st.plotly_chart(fig_h, use_container_width=True)
 
+# ---------------------------------------------------------------------------
+# PDF: full report (everything from Portfolio Explorer tab)
+# ---------------------------------------------------------------------------
+try:
+    import fitz  # PyMuPDF
+except Exception:
+    fitz = None
+
+
+def _fig_to_png(fig, scale: float = 2.0) -> bytes:
+    """Convert a Plotly figure to PNG using kaleido."""
+    return pio.to_image(fig, format="png", scale=scale, engine="kaleido")
+
+# ---- Figure builders mirroring on-screen charts ----
+
+def _fig_cumulative(port: pd.Series, panel: pd.DataFrame, chosen: list[str], template: str):
+    fig = go.Figure()
+    cum_port = (1.0 + port).cumprod()
+    fig.add_trace(go.Scatter(x=cum_port.index, y=cum_port.values, name="Portfolio",
+                             line=dict(width=3, color="black")))
+    for m in chosen:
+        s = panel[m].dropna()
+        fig.add_trace(go.Scatter(x=s.index, y=(1+s).cumprod(), name=m,
+                                 line=dict(width=1), opacity=0.5))
+    fig.update_layout(title="Cumulative Growth of £1", hovermode="x unified",
+                      legend=dict(orientation="h"), yaxis_title="Value (£)", xaxis_title="Date",
+                      margin=dict(l=40, r=20, t=60, b=40), template=template)
+    return fig
+
+def _fig_drawdown(port: pd.Series, template: str):
+    cum_port = (1.0 + port).cumprod()
+    dd = compute_drawdown(cum_port)
+    y_min = min(-1.0, float(dd.min()) * 1.05) if np.isfinite(dd.min()) else -1.0
+    fig = go.Figure(go.Scatter(x=dd.index, y=dd.values, name="Drawdown",
+                               line=dict(color="#d62728", width=2)))
+    fig.update_layout(title="Portfolio Drawdown", hovermode="x unified",
+                      xaxis_title="Date", yaxis_title="Drawdown",
+                      margin=dict(l=40, r=20, t=60, b=40), template=template)
+    fig.update_yaxes(tickformat=".0%", range=[y_min, 0])
+    return fig
+
+def _fig_roll12_return(port: pd.Series, template: str):
+    roll12_ret = (1.0 + port).rolling(12, min_periods=12).apply(np.prod, raw=True) - 1.0
+    fig = go.Figure(go.Scatter(x=roll12_ret.index, y=roll12_ret.values,
+                               name="12M Rolling Return", line=dict(color="#1f77b4", width=2)))
+    fig.update_layout(title="12‑month Rolling Return", hovermode="x unified",
+                      xaxis_title="Date", yaxis_title="Return (12M)",
+                      margin=dict(l=40, r=20, t=60, b=40), template=template)
+    fig.update_yaxes(tickformat=".0%")
+    return fig
+
+def _fig_roll12_vol(port: pd.Series, template: str):
+    roll12_vol = port.rolling(12, min_periods=12).std(ddof=0) * math.sqrt(12)
+    fig = go.Figure(go.Scatter(x=roll12_vol.index, y=roll12_vol.values,
+                               name="12M Rolling Vol (ann.)", line=dict(color="#ff7f0e", width=2)))
+    fig.update_layout(title="12‑month Rolling Volatility (Annualised)",
+                      hovermode="x unified", xaxis_title="Date", yaxis_title="Volatility (ann.)",
+                      margin=dict(l=40, r=20, t=60, b=40), template=template)
+    fig.update_yaxes(tickformat=".0%")
+    return fig
+
+def _fig_monthly_bars(port: pd.Series, template: str):
+    dfb = port.to_frame("Monthly Return").reset_index(names="Month")
+    fig = px.bar(dfb, x="Month", y="Monthly Return", title="Portfolio Monthly Returns",
+                 color="Monthly Return", color_continuous_scale="RdYlGn", template=template)
+    fig.update_yaxes(tickformat=".0%")
+    fig.update_layout(hovermode="x unified", margin=dict(l=40, r=20, t=60, b=40))
+    return fig
+
+def _fig_distribution_hist(port: pd.Series, template: str, nbins: int | None = None):
+    s = port.dropna()
+    fig = px.histogram(x=s.values, nbins=nbins, template=template)
+    fig.update_traces(marker_color="#1f77b4")
+    fig.update_layout(title="Distribution (Histogram)", xaxis_title="Monthly return", yaxis_title="Count")
+    fig.update_xaxes(tickformat=".1%")
+    return fig
+
+def _fig_correlation(panel: pd.DataFrame, chosen: list[str], template: str):
+    filt = panel.copy()
+    valid_cols = [c for c in filt.columns if filt[c].notna().any()]
+    filt = filt[valid_cols]
+    if len(filt.columns) < 2:
+        return None
+    corr = filt.corr(min_periods=3).dropna(how="all").dropna(how="all", axis=1)
+    fig = px.imshow(corr.round(2), text_auto=True, color_continuous_scale="RdBu_r", zmin=-1, zmax=1,
+                    title="Correlation (monthly returns)", template=template)
+    fig.update_layout(margin=dict(l=60, r=20, t=60, b=60))
+    return fig
+
+def _fig_year_month(port: pd.Series, template: str):
+    dfym = port.to_frame("ret").copy()
+    if dfym.empty:
+        return None
+    dfym["Year"] = dfym.index.year
+    dfym["Month"] = dfym.index.strftime("%b")
+    month_order = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+    piv = dfym.pivot(index="Year", columns="Month", values="ret")
+    piv = piv[[c for c in month_order if c in piv.columns]].sort_index()
+    if piv.empty:
+        return None
+    ytd = dfym.groupby("Year")["ret"].apply(lambda x: (1.0 + x).prod() - 1.0).reindex(piv.index)
+    piv["YTD"] = ytd
+    final_cols = [c for c in month_order if c in piv.columns] + ["YTD"]
+    piv = piv[final_cols]
+    fig = px.imshow(piv, color_continuous_scale="RdYlGn", origin="upper",
+                    title="Year × Month (incl. YTD)", template=template, aspect="auto")
+    # Symmetric color scale around zero
+    try:
+        v = piv.values.astype(float)
+        m = float(np.nanmax(np.abs(v))) if np.isfinite(np.nanmax(np.abs(v))) else 1.0
+        fig.update_coloraxes(cmin=-m, cmax=m)
+    except Exception:
+        pass
+    fig.update_layout(margin=dict(l=60, r=20, t=60, b=40))
+    fig.update_xaxes(side="top")
+    return fig
+
+def _fig_area_from_wide(df_wide: pd.DataFrame, title: str, template: str):
+    # Plotly area expects long format
+    if df_wide is None or df_wide.empty:
+        return None
+    tmp = df_wide.copy()
+    tmp.index.name = "Date"
+    long_df = tmp.reset_index().melt("Date", var_name="Manager", value_name="value")
+    fig = px.area(long_df, x="Date", y="value", color="Manager", template=template, title=title)
+    fig.update_yaxes(tickformat=".1%")
+    fig.update_layout(legend=dict(orientation="h"))
+    return fig
+
+def _distribution_table_text(s: pd.Series) -> str:
+    s = s.dropna()
+    desc = s.describe(percentiles=[0.05, 0.25, 0.5, 0.75, 0.95]).rename({
+        'count':'count', 'mean':'mean', 'std':'std', 'min':'min',
+        '5%':'p5','25%':'p25','50%':'p50','75%':'p75','95%':'p95','max':'max'
+    })
+    extras = {
+        '%_positive': (s > 0).mean(),
+        'best_month': s.max(),
+        'best_month_date': s.idxmax(),
+        'worst_month': s.min(),
+        'worst_month_date': s.idxmin(),
+        'ann_mean': s.mean() * 12.0,
+        'ann_std': s.std(ddof=1) * (12.0 ** 0.5),
+    }
+    df = pd.concat([desc, pd.Series(extras)]).to_frame("value")
+    lines = []
+    for idx, val in df["value"].items():
+        if isinstance(val, (float, np.floating)):
+            if any(k in idx for k in ["mean","std","min","max","p","%_positive","ann_"]):
+                lines.append(f"{idx:>18}: {val: .2%}")
+            else:
+                lines.append(f"{idx:>18}: {val: .6f}")
+        else:
+            lines.append(f"{idx:>18}: {val}")
+    return "\n".join(lines)
+
+
+def build_pdf_full_report(
+    port: pd.Series,
+    panel_sel: pd.DataFrame,
+    chosen: list[str],
+    weights: pd.Series,
+    meta: dict,
+    template: str,
+    nbins: int | None = None,
+) -> bytes:
+    """
+    Compose a multi-page PDF covering everything the Portfolio Explorer tab shows.
+    Requires: kaleido (for Plotly -> PNG) and PyMuPDF (fitz) for PDF assembly.
+    """
+    if fitz is None:
+        raise RuntimeError("PyMuPDF (fitz) is not available. Please `pip install pymupdf`.")
+
+    figs = []
+    # On-screen equivalents
+    figs.append(_fig_monthly_bars(port, template))
+    figs.append(_fig_cumulative(port, panel_sel, chosen, template))
+    figs.append(_fig_drawdown(port, template))
+
+    # Rolling charts if data exists
+    if (1.0 + port).rolling(12, min_periods=12).apply(np.prod, raw=True).dropna().size:
+        figs.append(_fig_roll12_return(port, template))
+    if port.rolling(12, min_periods=12).std(ddof=0).dropna().size:
+        figs.append(_fig_roll12_vol(port, template))
+
+    # Distribution
+    dist_text = _distribution_table_text(port)
+    figs.append(_fig_distribution_hist(port, template, nbins=nbins))
+
+    # Correlation & Year×Month
+    corr_fig = _fig_correlation(panel_sel, chosen, template)
+    if corr_fig is not None:
+        figs.append(corr_fig)
+    ym_fig = _fig_year_month(port, template)
+    if ym_fig is not None:
+        figs.append(ym_fig)
+
+    # Contributions
+    rc_df = overall_return_contrib(panel_sel, weights)
+    trc_df, _ = overall_risk_contrib(panel_sel, weights)
+    # Rolling contributions
+    try:
+        roll = rolling_contrib(panel_sel, weights, window=36)
+        trc_ts = roll.xs("TRC%", level=1) if not roll.empty else None
+        rc_ts  = roll.xs("RC%",  level=1) if not roll.empty else None
+    except Exception:
+        trc_ts = None
+        rc_ts = None
+    trc_fig = _fig_area_from_wide(trc_ts, "Rolling TRC% (window=36)", template)
+    rc_fig  = _fig_area_from_wide(rc_ts,  "Rolling RC% (window=36)", template)
+    if trc_fig is not None:
+        figs.append(trc_fig)
+    if rc_fig is not None:
+        figs.append(rc_fig)
+
+    # ---- Assemble PDF ----
+    doc = fitz.open()
+    margin = 36
+    page_w, page_h = 595, 842  # A4 portrait in points
+
+    # Cover page
+    page = doc.new_page(width=page_w, height=page_h)
+    title = "Portfolio Explorer — Full Report"
+    period = f"Period: {port.index.min().date()} → {port.index.max().date()}"
+    params = f"FX: {meta.get('fx_mode','-')} | Hedge ratio: {meta.get('hedge_ratio','-')}\n" \
+             f"GBP cash: {meta.get('gbp_cash_ann','-')} | USD cash: {meta.get('usd_cash_ann','-')}"
+
+    page.insert_textbox(fitz.Rect(margin, margin, page_w-margin, margin+36), title, fontsize=20, fontname="helv")
+    page.insert_textbox(fitz.Rect(margin, margin+36, page_w-margin, margin+60), period, fontsize=11, fontname="helv")
+    page.insert_textbox(fitz.Rect(margin, margin+60, page_w-margin, margin+100), params, fontsize=10, fontname="helv")
+
+    # Summary + Weights
+    summ = summarize(port)
+    def _fmt_summ(k, v):
+        if v is None: return None
+        if any(x in k for x in ["Return","Vol","Drawdown"]): return f"{k}: {v:.2%}"
+        if "Sharpe" in k or "Calmar" in k: return f"{k}: {v:.2f}"
+        return f"{k}: {v}"
+    lines = []
+    for k in ["Ann. Return","Ann. Vol","Sharpe (rf=0)","Max Drawdown","Calmar"]:
+        if k in summ:
+            sline = _fmt_summ(k, summ[k])
+            if sline: lines.append(sline)
+    text_summ = "\n".join(lines) if lines else "—"
+    weights_text = (weights.round(4).to_string() if weights is not None and not weights.empty else "—")
+
+    page.insert_textbox(fitz.Rect(margin, margin+110, page_w/2-6, page_h/2-40),
+                        "Summary\n\n" + text_summ, fontsize=10, fontname="helv")
+    page.insert_textbox(fitz.Rect(page_w/2+6, margin+110, page_w-margin, page_h/2-40),
+                        "Active weights (normalised)\n\n" + weights_text, fontsize=10, fontname="helv")
+
+    # Distribution table (text)
+    page.insert_textbox(fitz.Rect(margin, page_h/2-20, page_w-margin, page_h-margin),
+                        "Distribution (descriptive stats)\n\n" + dist_text, fontsize=9, fontname="helv")
+
+    # Charts: two per page
+    slot_h = (page_h - 2*margin - 20) / 2
+    page = None
+    for i, fig in enumerate(figs):
+        img = _fig_to_png(fig, scale=2.0)
+        if i % 2 == 0:
+            page = doc.new_page(width=page_w, height=page_h)
+            top = margin
+        else:
+            top = margin + slot_h + 20
+        rect = fitz.Rect(margin, top, page_w - margin, top + slot_h)
+        page.insert_image(rect, stream=img)
+
+    # Contributions tables
+    page = doc.new_page(width=page_w, height=page_h)
+    page.insert_textbox(fitz.Rect(margin, margin, page_w-margin, margin+22),
+                        "Return Contribution (annualised)", fontsize=14, fontname="helv")
+    page.insert_textbox(fitz.Rect(margin, margin+26, page_w-margin, page_h/2-6),
+                        rc_df.round(4).to_string(), fontsize=9, fontname="helv")
+    page.insert_textbox(fitz.Rect(margin, page_h/2+6, page_w-margin, page_h/2+28),
+                        "Total Risk Contribution (TRC%)", fontsize=14, fontname="helv")
+    page.insert_textbox(fitz.Rect(margin, page_h/2+32, page_w-margin, page_h-margin),
+                        trc_df.round(4).to_string(), fontsize=9, fontname="helv")
+
+    pdf_bytes = doc.tobytes()
+    doc.close()
+    return pdf_bytes
+
 # ------------------------------------------------------------------------------------
-# Original app code (unchanged aside from weights slider 0..1 and Distribution tab)
+# Original app code (unchanged aside from weights slider 0..1, Distribution tab & PDF button)
 # ------------------------------------------------------------------------------------
 
 st.set_page_config(page_title="Portfolio Explorer", layout="wide")
@@ -395,7 +678,19 @@ else:
     c_dl, c_share = st.columns([1,1])
     with c_dl:
         if st.button("Download PDF report", type="primary"):
-            pdf_bytes = build_pdf(port, panel[chosen], w, meta)
+            try:
+                pdf_bytes = build_pdf_full_report(
+                    port=port,
+                    panel_sel=panel[chosen],
+                    chosen=chosen,
+                    weights=w,
+                    meta=meta,
+                    template=template,
+                    nbins=None,
+                )
+            except Exception:
+                # Fallback to your existing builder if kaleido or pymupdf not available
+                pdf_bytes = build_pdf(port, panel[chosen], w, meta)
             st.download_button("Save PDF", data=pdf_bytes, file_name="portfolio_report.pdf", mime="application/pdf")
     with c_share:
         st.button("Share / bookmark this setup", on_click=encode_state_to_query)
