@@ -20,3 +20,6 @@ PyMuPDF==1.26.4
 
 # Optional (for HAC / Newey–West)
 statsmodels==0.14.5
+
+# For Plotly -> PNG export used by the full PDF builder
+kaleido==0.2.1

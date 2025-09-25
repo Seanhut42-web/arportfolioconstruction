@@ -1,10 +1,9 @@
-
 # 1_Portfolio_Explorer.py
-# Minimal change version (v4):
+# Minimal change version (v6 - final):
 # - Keeps everything else untouched (contributions, layout, simplified Distribution).
 # - Keeps weights sliders at 0..1.
-# - Upgrades PDF: includes EVERYTHING produced by the Portfolio Explorer tab
-#   using Plotly->PNG via kaleido and PDF assembly via PyMuPDF (with fallback to existing build_pdf).
+# - Full PDF export: includes EVERYTHING shown in Portfolio Explorer tab via Plotly->PNG (kaleido) + PyMuPDF (fitz).
+#   Falls back to existing build_pdf if deps missing.
 
 import math
 from pathlib import Path
@@ -21,6 +20,7 @@ from src.metrics import summarize, compute_drawdown
 from src.contrib import overall_return_contrib, overall_risk_contrib, rolling_contrib
 from src.report import build_pdf  # fallback
 from src.state import load_state_from_query, encode_state_to_query, apply_theme, get_plotly_template
+
 
 # ---------------------------------------------------------------------------
 # Distribution (SIMPLIFIED): descriptive table + histogram only
@@ -67,6 +67,7 @@ def render_distribution_panel(st, monthly_portfolio: pd.Series, template=None):
 
     with c1:
         desc_df = _desc_table(s)
+
         def _fmt_row(idx, val):
             try:
                 if any(k in idx for k in ["mean","std","min","max","p","%_positive","ann_"]):
@@ -74,6 +75,7 @@ def render_distribution_panel(st, monthly_portfolio: pd.Series, template=None):
                 return f"{val}" if not isinstance(val, (float,int)) else f"{val:.4f}"
             except Exception:
                 return f"{val}"
+
         st.dataframe(
             desc_df.assign(display=desc_df.index).set_index('display')
                    .apply(lambda col: [ _fmt_row(idx, val) for idx,val in zip(desc_df.index, col)], axis=0)
@@ -89,6 +91,7 @@ def render_distribution_panel(st, monthly_portfolio: pd.Series, template=None):
         fig_h.update_layout(title="Distribution (Histogram)", xaxis_title="Monthly return", yaxis_title="Count")
         fig_h.update_xaxes(tickformat=".1%")
         st.plotly_chart(fig_h, use_container_width=True)
+
 
 # ---------------------------------------------------------------------------
 # PDF: full report (everything from Portfolio Explorer tab)
@@ -372,6 +375,7 @@ def build_pdf_full_report(
     pdf_bytes = doc.tobytes()
     doc.close()
     return pdf_bytes
+
 
 # ------------------------------------------------------------------------------------
 # Original app code (unchanged aside from weights slider 0..1, Distribution tab & PDF button)
