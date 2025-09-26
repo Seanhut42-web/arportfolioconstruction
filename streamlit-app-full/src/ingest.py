@@ -1,3 +1,4 @@
+
 from __future__ import annotations
 from pathlib import Path
 import pandas as pd
@@ -6,7 +7,8 @@ from pandas.tseries.offsets import MonthEnd
 
 FREQ_ME = "ME"
 
-# --- helpers ---
+# -- helpers --
+
 def _dedup_columns(cols):
     seen, out = {}, []
     for c in cols:
@@ -16,6 +18,7 @@ def _dedup_columns(cols):
         out.append(k if n == 0 else f"{k}.{n}")
     return out
 
+
 def _find_header_row(df_raw: pd.DataFrame) -> int:
     for i in range(len(df_raw)):
         row_vals = df_raw.iloc[i].astype(str).str.strip().str.lower().values
@@ -23,18 +26,53 @@ def _find_header_row(df_raw: pd.DataFrame) -> int:
             return i
     return 0
 
+
+# -------------------- FIX 1: robust frequency inference --------------------
+
 def infer_frequency(dates: pd.Series, stated: str | None) -> str:
+    """
+    Infer cadence from observed date spacing, but:
+      - Trust stated 'daily' or 'weekly' if present.
+      - Only keep a stated 'monthly' if the observed cadence doesn't contradict it.
+    Heuristic:
+      * median gap <= 2 days -> daily
+      * median gap <= 9 days OR any month has >= 4 observations -> weekly
+      * else -> monthly
+    """
+    dt = pd.to_datetime(dates, errors="coerce").dropna()
+
+    # If nothing parsed, fall back to stated if sensible
+    if dt.empty:
+        if isinstance(stated, str):
+            s = stated.lower()
+            if "daily" in s:  return "daily"
+            if "weekly" in s: return "weekly"
+            if "month" in s:  return "monthly"
+        return "monthly"
+
+    diffs = dt.sort_values().diff().dt.days.dropna()
+    med = diffs.median() if not diffs.empty else 30
+    # Highest number of observations in any calendar month
+    obs_per_month = dt.to_period("M").value_counts().max()
+
+    inferred = (
+        "daily" if med <= 2 else (
+        "weekly" if med <= 9 or (obs_per_month is not None and obs_per_month >= 4) else
+        "monthly")
+    )
+
     if isinstance(stated, str):
-        s = stated.lower()
-        if "daily" in s: return "daily"
-        if "weekly" in s: return "weekly"
-        if "month" in s:  return "monthly"
-    dt = pd.to_datetime(dates, errors="coerce")
-    diff = dt.diff().dt.days.dropna()
-    med = diff.median() if not diff.empty else 30
-    if med <= 2:  return "daily"
-    if med <= 9:  return "weekly"
-    return "monthly"
+        s = stated.strip().lower()
+        if "daily" in s:
+            return "daily"
+        if "weekly" in s:
+            return "weekly"
+        if "month" in s:
+            # keep monthly only if observed cadence agrees
+            return "monthly" if inferred == "monthly" else inferred
+
+    return inferred
+
 
 def read_manager_sheet(xls, sheet: str) -> pd.DataFrame:
     raw = pd.read_excel(xls, sheet_name=sheet, header=None, engine="openpyxl")
@@ -60,7 +98,8 @@ def read_manager_sheet(xls, sheet: str) -> pd.DataFrame:
     df["Date"] = parsed[parsed.notna()]
 
     ret_col = next((c for c in df.columns if c.lower() == "return" or c.lower().startswith("return")), None)
-    if ret_col is None: ret_col = next((c for c in df.columns if "ret" in c.lower()), None)
+    if ret_col is None:
+        ret_col = next((c for c in df.columns if "ret" in c.lower()), None)
     if ret_col is None:
         nums = [c for c in df.select_dtypes(include=[np.number]).columns if c != "Date"]
         ret_col = nums[0] if nums else None
@@ -72,6 +111,7 @@ def read_manager_sheet(xls, sheet: str) -> pd.DataFrame:
 
     keep = ["Date", ret_col] + ([cur_col] if cur_col else []) + ([frq_col] if frq_col else [])
     out = df[keep].copy()
+
     rename = {ret_col: "Return"}
     if cur_col: rename[cur_col] = "Currency"
     if frq_col: rename[frq_col] = "Frequency"
@@ -79,9 +119,12 @@ def read_manager_sheet(xls, sheet: str) -> pd.DataFrame:
 
     out["Return"] = pd.to_numeric(out["Return"], errors="coerce")
     out = out.dropna(subset=["Date", "Return"]).sort_values("Date").reset_index(drop=True)
+
     if "Currency" in out:  out["Currency"]  = out["Currency"].astype(str).str.strip()
     if "Frequency" in out: out["Frequency"] = out["Frequency"].astype(str).str.strip()
+
     return out
+
 
 def read_fx_sheet(xls, sheet: str) -> pd.Series:
     raw = pd.read_excel(xls, sheet_name=sheet, header=None, engine="openpyxl")
@@ -111,6 +154,7 @@ def read_fx_sheet(xls, sheet: str) -> pd.Series:
         name = c.lower().replace(" ", "")
         if "usdgbp" in name: fx_col, invert = c, False; break
         if "gbpusd" in name: fx_col, invert = c, True;  break
+
     if fx_col is None:
         counts = []
         for c in df.columns:
@@ -123,11 +167,13 @@ def read_fx_sheet(xls, sheet: str) -> pd.Series:
         fx_col = max(counts, key=lambda x: x[1])[0]
 
     rate = pd.to_numeric(df[fx_col], errors="coerce")
-    fx = pd.Series(rate.values, index=pd.to_datetime(df["Date"])).dropna().sort_index()
+    fx = pd.Series(rate.values, index=pd.to_datetime(df["Date"]))\
+           .dropna().sort_index()
     fx = fx[~fx.index.duplicated(keep="last")]
     if invert:
         fx = 1.0 / fx
     return fx
+
 
 def to_monthly_compounded(s: pd.Series) -> pd.Series:
     s = s.dropna().copy()
@@ -135,6 +181,7 @@ def to_monthly_compounded(s: pd.Series) -> pd.Series:
     m = (1.0 + s).resample(FREQ_ME).prod() - 1.0
     m.index = m.index + MonthEnd(0)
     return m[~m.index.duplicated(keep="last")].dropna()
+
 
 def monthlyize_if_needed(s: pd.Series, freq: str) -> pd.Series:
     s = s.dropna().copy()
@@ -145,7 +192,9 @@ def monthlyize_if_needed(s: pd.Series, freq: str) -> pd.Series:
     m.index = m.index.to_timestamp("M")
     return m[~m.index.duplicated(keep="last")].dropna()
 
-# --- public API ---
+
+# -- public API --
+
 def parse_workbook(path: Path) -> pd.DataFrame:
     xls = pd.ExcelFile(path, engine="openpyxl")
     sheets = xls.sheet_names
@@ -178,6 +227,7 @@ def parse_workbook(path: Path) -> pd.DataFrame:
         df = read_manager_sheet(xls, sh)
         if df.empty or "Date" not in df or "Return" not in df:
             continue
+
         freq = infer_frequency(
             df["Date"],
             df["Frequency"].iloc[0] if "Frequency" in df.columns and not df["Frequency"].isna().all() else None
@@ -186,10 +236,11 @@ def parse_workbook(path: Path) -> pd.DataFrame:
 
         s = pd.Series(df["Return"].values, index=pd.to_datetime(df["Date"]))
         s = s.sort_index()
+
         if ccy == "USD":
             if freq == "monthly":
                 r_usd_m = monthlyize_if_needed(s, "monthly")
-                r_fx_m  = fx_monthly.reindex(r_usd_m.index).fillna(0.0)
+                r_fx_m = fx_monthly.reindex(r_usd_m.index).fillna(0.0)
                 out = (1.0 + r_usd_m) * (1.0 + r_fx_m) - 1.0
             else:
                 r_fx_p = fx_daily.reindex(s.index, method="ffill").fillna(0.0)
@@ -205,11 +256,12 @@ def parse_workbook(path: Path) -> pd.DataFrame:
         raise ValueError("No valid manager series found in workbook.")
 
     start = min(s.index.min() for s in man.values())
-    end   = max(s.index.max() for s in man.values())
+    end = max(s.index.max() for s in man.values())
     months = pd.date_range(start=start, end=end, freq=FREQ_ME)
     returns_df = pd.DataFrame({k: v.reindex(months) for k, v in man.items()})
     returns_df.index.name = "Month"
     return returns_df
+
 
 def parse_or_load_cached(path: Path, cache_parquet: Path | None = None) -> pd.DataFrame:
     if cache_parquet and cache_parquet.exists():
