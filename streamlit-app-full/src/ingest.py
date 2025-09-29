@@ -27,7 +27,8 @@ def _find_header_row(df_raw: pd.DataFrame) -> int:
     return 0
 
 
-# -------------------- FIX 1: robust frequency inference --------------------
+# -------------------- FIX HOTPATCH --------------------
+# Robust frequency inference + correct Period conversion for Series
 
 def infer_frequency(dates: pd.Series, stated: str | None) -> str:
     """
@@ -52,8 +53,11 @@ def infer_frequency(dates: pd.Series, stated: str | None) -> str:
 
     diffs = dt.sort_values().diff().dt.days.dropna()
     med = diffs.median() if not diffs.empty else 30
+
     # Highest number of observations in any calendar month
-    obs_per_month = dt.to_period("M").value_counts().max()
+    # NOTE: dt is a Series; use .dt.to_period('M') (not Series.to_period)
+    per = dt.dt.to_period("M") if hasattr(dt, 'dt') else pd.PeriodIndex(dt, freq='M')
+    obs_per_month = per.value_counts().max()
 
     inferred = (
         "daily" if med <= 2 else (
@@ -74,6 +78,8 @@ def infer_frequency(dates: pd.Series, stated: str | None) -> str:
     return inferred
 
 
+# -------------------- rest of the pipeline (with safer datetime parsing) ---------------------
+
 def read_manager_sheet(xls, sheet: str) -> pd.DataFrame:
     raw = pd.read_excel(xls, sheet_name=sheet, header=None, engine="openpyxl")
     raw = raw.dropna(how="all").dropna(axis=1, how="all")
@@ -87,7 +93,8 @@ def read_manager_sheet(xls, sheet: str) -> pd.DataFrame:
     candidates = [c for c in df.columns if "date" in c.lower()] or list(df.columns)
     date_col, best_n, parsed = None, -1, None
     for c in candidates:
-        tp = pd.to_datetime(df[c], errors="coerce")
+        # Use format="mixed" and dayfirst=True to avoid noisy warnings and parse common UK formats
+        tp = pd.to_datetime(df[c], errors="coerce", dayfirst=True, format="mixed")
         n = tp.notna().sum()
         if n > best_n:
             best_n, date_col, parsed = n, c, tp
@@ -139,7 +146,7 @@ def read_fx_sheet(xls, sheet: str) -> pd.Series:
     candidates = [c for c in df.columns if "date" in c.lower()] or list(df.columns)
     date_col, best_n, parsed = None, -1, None
     for c in candidates:
-        tp = pd.to_datetime(df[c], errors="coerce")
+        tp = pd.to_datetime(df[c], errors="coerce", dayfirst=True, format="mixed")
         n = tp.notna().sum()
         if n > best_n:
             best_n, date_col, parsed = n, c, tp
@@ -188,6 +195,7 @@ def monthlyize_if_needed(s: pd.Series, freq: str) -> pd.Series:
     s.index = pd.to_datetime(s.index)
     if freq in ("daily", "weekly"):
         return to_monthly_compounded(s)
+    # If it was truly monthly, collapse to last obs per month
     m = s.groupby(s.index.to_period("M")).last()
     m.index = m.index.to_timestamp("M")
     return m[~m.index.duplicated(keep="last")].dropna()
