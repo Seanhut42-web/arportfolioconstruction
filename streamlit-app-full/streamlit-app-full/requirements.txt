@@ -1,0 +1,25 @@
+# Build tooling (ensures wheels and avoids source builds)
+pip>=25
+setuptools>=75
+wheel>=0.44
+
+# Use wheels only (fail fast if no wheel, avoids metadata-generation-failed)
+--only-binary=:all:
+
+# Core
+streamlit>=1.34
+pandas>=2.2
+numpy>=2.0
+
+# Python 3.13-compatible pins (wheels available on manylinux)
+matplotlib==3.10.6
+scipy==1.14.1
+plotly==5.22.0
+openpyxl==3.1.2
+PyMuPDF==1.26.4
+
+# Optional (for HAC / Newey–West)
+statsmodels==0.14.5
+
+# For Plotly -> PNG export used by the full PDF builder
+kaleido==0.2.1
